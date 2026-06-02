@@ -1,12 +1,12 @@
-# Bright Futures Generator v2.0
+<div align="center">
+<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
+</div>
 
-A random futures generating tool for inspiration and provocation. 
+# Run and deploy your AI Studio app
 
-It matches a sector or a concept with a technology to claim that technology will be the reason for a better future for that aspect of our lives. It's also capable of generating explanations for the random combinations and images to share around (or to add your presentations) using Gemini.
+This contains everything you need to run your app locally.
 
-**You can play around with the Bright Futures Generator here: https://brightfutures.tuhaf.studio**
-
-**You can find more details about the project and background of the experiment here: [https://tuhaf.studio/projects/bright-futures-generator/](https://tuhaf.studio/projects/bright-futures-generator/)**
+View your app in AI Studio: https://ai.studio/apps/eaf0ec95-0a6d-4b67-afbd-27b6f76a7d48
 
 ## Run Locally
 
