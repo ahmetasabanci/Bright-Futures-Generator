@@ -119,6 +119,16 @@ const App: React.FC = () => {
         ctx.shadowOffsetY = 4;
       };
       const clearShadow = () => { ctx.shadowBlur = 0; ctx.shadowColor = 'transparent'; };
+      // Headlines are drawn on one line; shrink long ones so they stay inside the card
+      const drawHeadline = (text: string, y: number) => {
+        let size = 92;
+        ctx.font = `italic bold ${size}px Comfortaa`;
+        while (size > 48 && ctx.measureText(text).width > 1760) {
+          size -= 2;
+          ctx.font = `italic bold ${size}px Comfortaa`;
+        }
+        ctx.fillText(text, 960, y);
+      };
 
       // Header Badge
       ctx.font = '900 22px Montserrat';
@@ -134,10 +144,9 @@ const App: React.FC = () => {
 
       // Sector
       applyShadow(30);
-      ctx.font = 'italic bold 92px Comfortaa';
       ctx.fillStyle = '#238197';
       ctx.letterSpacing = '-2px';
-      ctx.fillText(prediction.sector.toUpperCase(), 960, 350);
+      drawHeadline(prediction.sector.toUpperCase(), 350);
       clearShadow();
 
       // Connect
@@ -148,10 +157,9 @@ const App: React.FC = () => {
 
       // Tech
       applyShadow(30);
-      ctx.font = 'italic bold 92px Comfortaa';
       ctx.fillStyle = '#DE8859';
       ctx.letterSpacing = '-2px';
-      ctx.fillText(prediction.technology.toUpperCase(), 960, 560);
+      drawHeadline(prediction.technology.toUpperCase(), 560);
       clearShadow();
 
       // Strategic Argument (Automatic or Manual)
