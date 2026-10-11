@@ -1,0 +1,41 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Self-hosted fonts (latin subsets cover the UI copy and the vision card) */
+@import "@fontsource/montserrat/latin-200.css";
+@import "@fontsource/montserrat/latin-300.css";
+@import "@fontsource/montserrat/latin-400.css";
+@import "@fontsource/montserrat/latin-500.css";
+@import "@fontsource/montserrat/latin-600.css";
+@import "@fontsource/montserrat/latin-700.css";
+@import "@fontsource/montserrat/latin-900.css";
+@import "@fontsource/playfair-display/latin-700.css";
+@import "@fontsource/playfair-display/latin-700-italic.css";
+@import "@fontsource/comfortaa/latin-300.css";
+@import "@fontsource/comfortaa/latin-700.css";
+
+@theme {
+  --font-sans: "Montserrat", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Playfair Display", ui-serif, Georgia, serif;
+}
+
+@layer base {
+  body {
+    font-family: var(--font-sans);
+    background: #0b1121;
+    color: #f8fafc;
+    overflow-x: hidden;
+  }
+
+  /* Tailwind v4 dropped the pointer cursor on buttons; keep the v3 behaviour */
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+}
+
+@utility bg-glass {
+  background: rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}

@@ -5,6 +5,23 @@ import { FuturePrediction, ExplanationState } from './types';
 import { fetchExplanation, generateVisionImage } from './services/geminiService';
 import BackgroundEffects from './components/BackgroundEffects';
 
+// Every font face the vision card draws with. Canvas text doesn't trigger web font
+// loading by itself, so these must be loaded before drawing or the card falls back
+// to a system font.
+const CARD_FONTS = [
+  '900 22px Montserrat',
+  '500 36px Montserrat',
+  '300 36px Montserrat',
+  'bold 22px Montserrat',
+  'italic bold 92px Comfortaa',
+  'italic 300 22px Comfortaa',
+];
+
+const loadCardFonts = () =>
+  Promise.all(CARD_FONTS.map(font => document.fonts.load(font))).catch(err => {
+    console.warn("Could not load vision card fonts, falling back to system fonts.", err);
+  });
+
 const App: React.FC = () => {
   const [prediction, setPrediction] = useState<FuturePrediction>({ sector: '', technology: '' });
   const [explanation, setExplanation] = useState<ExplanationState>({
@@ -63,6 +80,7 @@ const App: React.FC = () => {
       const [currentExplanation, base64Image] = await Promise.all([
         explanationPromise,
         generateVisionImage(prediction.sector, prediction.technology),
+        loadCardFonts(),
       ]);
       
       const canvas = document.createElement('canvas');
@@ -214,7 +232,7 @@ const App: React.FC = () => {
         <div className="flex items-center space-x-3 px-5 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-xl shadow-lg ring-1 ring-white/5">
           <div className="relative flex items-center justify-center">
             <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: '#DE8859' }} />
-            <span className="absolute inset-0 w-1.5 h-1.5 rounded-full blur-sm opacity-50 animate-ping" style={{ backgroundColor: '#DE8859' }} />
+            <span className="absolute inset-0 w-1.5 h-1.5 rounded-full blur-xs opacity-50 animate-ping" style={{ backgroundColor: '#DE8859' }} />
           </div>
           <span className="text-[9px] md:text-xs font-black tracking-[0.4em] uppercase opacity-90" style={{ color: '#F3C5AB' }}>
             Bright Futures Generator v2.0

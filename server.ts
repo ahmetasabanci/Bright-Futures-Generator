@@ -203,6 +203,25 @@ async function integrateVite() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // Everything (scripts, styles, fonts) is self-hosted, so the page only needs its
+    // own origin. Inline styles are allowed for React style props; data:/blob: images
+    // cover the generated vision image and the background noise texture.
+    // frame-ancestors is deliberately not set so the app can still be embedded (AI Studio preview).
+    const contentSecurityPolicy = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; ");
+    app.use((req, res, next) => {
+      res.setHeader("Content-Security-Policy", contentSecurityPolicy);
+      next();
+    });
     // Vite emits content-hashed filenames under /assets, so they can be cached forever
     app.use("/assets", express.static(path.join(distPath, "assets"), { immutable: true, maxAge: "1y" }));
     app.use(express.static(distPath));
