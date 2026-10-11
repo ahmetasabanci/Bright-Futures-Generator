@@ -1,3 +1,16 @@
+export interface ServerConfig {
+  explanationProvider: "gemini" | "claude" | null;
+  visionEnabled: boolean;
+}
+
+export async function fetchServerConfig(): Promise<ServerConfig> {
+  const response = await fetch("/api/config");
+  if (!response.ok) {
+    throw new Error(`Server responded with status ${response.status}`);
+  }
+  return response.json();
+}
+
 export async function fetchExplanation(sector: string, technology: string): Promise<string> {
   try {
     const response = await fetch("/api/predict/explain", {

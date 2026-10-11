@@ -2,22 +2,49 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { Request, Response, NextFunction } from "express";
+import { rateLimit } from "express-rate-limit";
+import { SECTORS, TECHNOLOGIES } from "./constants";
+import { createExplainer, resolveExplanationProvider } from "./server/explanation";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-// Enable JSON body parsing for API requests
-app.use(express.json());
+app.disable("x-powered-by");
 
-// Initialize server-side Gemini client securely
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
+// Rate limiting keys on req.ip, so behind a reverse proxy (e.g. Cloud Run) we must
+// trust the proxy's X-Forwarded-For. Only trust it when actually deployed behind one,
+// otherwise clients could spoof the header to dodge the limits.
+const trustProxy = process.env.TRUST_PROXY ?? (process.env.K_SERVICE ? "1" : undefined);
+if (trustProxy !== undefined) {
+  app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
 });
+
+// Enable JSON body parsing for API requests (payloads are two short strings)
+app.use(express.json({ limit: "1kb" }));
+
+// Initialize server-side AI clients. Gemini handles images (and explanations by
+// default); Claude can handle explanations when ANTHROPIC_API_KEY is configured.
+const ai = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    })
+  : null;
+const explanationProvider = resolveExplanationProvider();
+const explain = explanationProvider ? createExplainer(explanationProvider, ai) : null;
+console.log(
+  `Explanations: ${explanationProvider ?? "not configured"} | Vision images: ${ai ? "gemini" : "disabled (no GEMINI_API_KEY)"}`,
+);
 
 // Middleware to protect API routes from cross-site proxy abuse
 function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
@@ -37,6 +64,9 @@ function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
   }
 
   // Fallback origin checking against Host for older browsers
+  if (!origin && !referer) {
+    return res.status(403).json({ error: "Access Denied. Missing request origin." });
+  }
   if (origin) {
     const originHost = origin.replace(/^https?:\/\//, "");
     if (originHost !== host) {
@@ -62,64 +92,67 @@ function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+const SECTOR_SET = new Set(SECTORS);
+const TECHNOLOGY_SET = new Set(TECHNOLOGIES);
+
+// Only accept combinations the UI can actually produce. This keeps user-controlled
+// text out of the prompts, so the endpoints can't be used as a general Gemini proxy.
+function validatePrediction(req: Request, res: Response, next: NextFunction) {
+  const { sector, technology } = req.body ?? {};
+  if (typeof sector !== "string" || typeof technology !== "string") {
+    return res.status(400).json({ error: "Both sector and technology parameters are required." });
+  }
+  if (!SECTOR_SET.has(sector) || !TECHNOLOGY_SET.has(technology)) {
+    return res.status(400).json({ error: "Unknown sector or technology." });
+  }
+  next();
+}
+
+const rateLimitMessage = { error: "Too many requests. Please wait a few minutes and try again." };
+const limiterDefaults = {
+  windowMs: 10 * 60 * 1000,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: rateLimitMessage,
+} as const;
+const explainLimiter = rateLimit({ ...limiterDefaults, limit: 30 });
+// Image generation is the expensive call, so it gets a tighter budget
+const visionLimiter = rateLimit({ ...limiterDefaults, limit: 10 });
+
 // Health check endpoint
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Tells the client which features this deployment supports
+app.get("/api/config", (req, res) => {
+  res.json({ explanationProvider, visionEnabled: Boolean(ai) });
+});
+
+const notConfigured = (res: Response) =>
+  res.status(503).json({ error: "This feature is not configured on the server." });
+
 // Server-side explanation casting API
-app.post("/api/predict/explain", restrictToSameOrigin, async (req, res) => {
+app.post("/api/predict/explain", restrictToSameOrigin, explainLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
-    if (!sector || !technology) {
-      return res.status(400).json({ error: "Both sector and technology parameters are required." });
-    }
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({
-        error: "Server configuration missing: GEMINI_API_KEY is not configured.",
-      });
-    }
-
-    const prompt = `
-      The statement is: "The future of ${sector} will be bright because of ${technology}."
-      
-      Provide a short, optimistic, and compelling 2-3 sentence argument explaining why this combination specifically creates a better future. 
-      Use professional but inspiring language. Avoid cliches.
-    `;
-
-    // Using gemini-3.5-flash as recommended for general text task in guidelines
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.8,
-        topP: 0.9,
-      },
-    });
-
-    res.json({ text: response.text || "No explanation could be generated at this time." });
+    if (!explain) return notConfigured(res);
+    res.json({ text: await explain(sector, technology) });
   } catch (error) {
     console.error("Strategic Argument Generation Error:", error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to connect to the future-seeing core.",
+      error: "Failed to connect to the future-seeing core.",
     });
   }
 });
 
 // Server-side vision image generation API
-app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
+app.post("/api/predict/vision", restrictToSameOrigin, visionLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
-    if (!sector || !technology) {
-      return res.status(400).json({ error: "Both sector and technology parameters are required." });
-    }
 
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({
-        error: "Server configuration missing: GEMINI_API_KEY is not configured.",
-      });
-    }
+    if (!ai) return notConfigured(res);
 
     const prompt = `A cinematic, high-quality, futuristic visualization of ${technology} transforming ${sector}. 
       Abstract, clean, professional aesthetic, optimistic atmosphere, wide-angle 16:9 composition. 
@@ -139,7 +172,7 @@ app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
     if (response?.candidates?.[0]?.content?.parts) {
       for (const part of response.candidates[0].content.parts) {
         if (part.inlineData) {
-          base64Image = `data:image/png;base64,${part.inlineData.data}`;
+          base64Image = `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
           break;
         }
       }
@@ -153,7 +186,7 @@ app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
   } catch (error) {
     console.error("Vision Synthesis Error:", error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : "Connection failed during vision synthesis.",
+      error: "Connection failed during vision synthesis.",
     });
   }
 });
@@ -169,6 +202,27 @@ async function integrateVite() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // Everything (scripts, styles, fonts) is self-hosted, so the page only needs its
+    // own origin. Inline styles are allowed for React style props; data:/blob: images
+    // cover the generated vision image and the background noise texture.
+    // frame-ancestors is deliberately not set so the app can still be embedded (AI Studio preview).
+    const contentSecurityPolicy = [
+      "default-src 'self'",
+      "script-src 'self'",
+      "style-src 'self' 'unsafe-inline'",
+      "img-src 'self' data: blob:",
+      "font-src 'self'",
+      "connect-src 'self'",
+      "object-src 'none'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join("; ");
+    app.use((req, res, next) => {
+      res.setHeader("Content-Security-Policy", contentSecurityPolicy);
+      next();
+    });
+    // Vite emits content-hashed filenames under /assets, so they can be cached forever
+    app.use("/assets", express.static(path.join(distPath, "assets"), { immutable: true, maxAge: "1y" }));
     app.use(express.static(distPath));
     app.get("*all", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));

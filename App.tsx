@@ -1,9 +1,26 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { SECTORS, TECHNOLOGIES } from './constants';
 import { FuturePrediction, ExplanationState } from './types';
-import { fetchExplanation, generateVisionImage } from './services/geminiService';
+import { fetchExplanation, fetchServerConfig, generateVisionImage, ServerConfig } from './services/apiService';
 import BackgroundEffects from './components/BackgroundEffects';
+
+// Every font face the vision card draws with. Canvas text doesn't trigger web font
+// loading by itself, so these must be loaded before drawing or the card falls back
+// to a system font.
+const CARD_FONTS = [
+  '900 22px Montserrat',
+  '500 36px Montserrat',
+  '300 36px Montserrat',
+  'bold 22px Montserrat',
+  'italic bold 92px Comfortaa',
+  'italic 300 22px Comfortaa',
+];
+
+const loadCardFonts = () =>
+  Promise.all(CARD_FONTS.map(font => document.fonts.load(font))).catch(err => {
+    console.warn("Could not load vision card fonts, falling back to system fonts.", err);
+  });
 
 const App: React.FC = () => {
   const [prediction, setPrediction] = useState<FuturePrediction>({ sector: '', technology: '' });
@@ -14,8 +31,13 @@ const App: React.FC = () => {
   });
   const [isGeneratingVision, setIsGeneratingVision] = useState(false);
   const [showCopyFeedback, setShowCopyFeedback] = useState(false);
+  // Assume the original Gemini-only setup until the server says otherwise
+  const [serverConfig, setServerConfig] = useState<ServerConfig>({ explanationProvider: 'gemini', visionEnabled: true });
+  // Bumped on every recast so responses for an older prediction are discarded
+  const predictionIdRef = useRef(0);
   
   const generateNewPrediction = useCallback(() => {
+    predictionIdRef.current++;
     const randomSector = SECTORS[Math.floor(Math.random() * SECTORS.length)];
     const randomTech = TECHNOLOGIES[Math.floor(Math.random() * TECHNOLOGIES.length)];
     setPrediction({ sector: randomSector, technology: randomTech });
@@ -27,16 +49,27 @@ const App: React.FC = () => {
     generateNewPrediction();
   }, [generateNewPrediction]);
 
+  useEffect(() => {
+    fetchServerConfig()
+      .then(setServerConfig)
+      .catch(err => console.warn("Could not load server config, using defaults.", err));
+  }, []);
+
   const handleExplain = async () => {
     if (!prediction.sector || !prediction.technology) return;
+    const predictionId = predictionIdRef.current;
     setExplanation(prev => ({ ...prev, isLoading: true, error: null }));
     try {
       const response = await fetchExplanation(prediction.sector, prediction.technology);
-      setExplanation({ text: response, isLoading: false, error: null });
+      if (predictionId === predictionIdRef.current) {
+        setExplanation({ text: response, isLoading: false, error: null });
+      }
       return response;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'An unexpected error occurred.';
-      setExplanation({ text: '', isLoading: false, error: msg });
+      if (predictionId === predictionIdRef.current) {
+        setExplanation({ text: '', isLoading: false, error: msg });
+      }
       throw new Error(msg);
     }
   };
@@ -44,18 +77,19 @@ const App: React.FC = () => {
   const handleCreateArtifact = async () => {
     setIsGeneratingVision(true);
     try {
-      // 1. Auto-generate explanation if missing so the card is complete
-      let currentExplanation = explanation.text;
-      if (!currentExplanation) {
-        try {
-          currentExplanation = await handleExplain() || '';
-        } catch (e) {
-          console.warn("Could not fetch explanation for artifact, proceeding with basic card.");
-        }
-      }
-
-      // 2. Generate the background vision
-      const base64Image = await generateVisionImage(prediction.sector, prediction.technology);
+      // 1. Auto-generate explanation if missing so the card is complete,
+      // 2. while generating the background vision in parallel
+      const explanationPromise = explanation.text
+        ? Promise.resolve(explanation.text)
+        : handleExplain().then(text => text || '').catch(() => {
+            console.warn("Could not fetch explanation for artifact, proceeding with basic card.");
+            return '';
+          });
+      const [currentExplanation, base64Image] = await Promise.all([
+        explanationPromise,
+        generateVisionImage(prediction.sector, prediction.technology),
+        loadCardFonts(),
+      ]);
       
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
@@ -65,8 +99,11 @@ const App: React.FC = () => {
       canvas.height = 1080;
 
       const bgImg = new Image();
-      bgImg.src = base64Image;
-      await new Promise((resolve) => (bgImg.onload = resolve));
+      await new Promise((resolve, reject) => {
+        bgImg.onload = resolve;
+        bgImg.onerror = () => reject(new Error("Generated vision image could not be decoded."));
+        bgImg.src = base64Image;
+      });
 
       // 3. Draw Background & Overlays
       ctx.drawImage(bgImg, 0, 0, 1920, 1080);
@@ -90,6 +127,16 @@ const App: React.FC = () => {
         ctx.shadowOffsetY = 4;
       };
       const clearShadow = () => { ctx.shadowBlur = 0; ctx.shadowColor = 'transparent'; };
+      // Headlines are drawn on one line; shrink long ones so they stay inside the card
+      const drawHeadline = (text: string, y: number) => {
+        let size = 92;
+        ctx.font = `italic bold ${size}px Comfortaa`;
+        while (size > 48 && ctx.measureText(text).width > 1760) {
+          size -= 2;
+          ctx.font = `italic bold ${size}px Comfortaa`;
+        }
+        ctx.fillText(text, 960, y);
+      };
 
       // Header Badge
       ctx.font = '900 22px Montserrat';
@@ -105,10 +152,9 @@ const App: React.FC = () => {
 
       // Sector
       applyShadow(30);
-      ctx.font = 'italic bold 92px Comfortaa';
       ctx.fillStyle = '#238197';
       ctx.letterSpacing = '-2px';
-      ctx.fillText(prediction.sector.toUpperCase(), 960, 350);
+      drawHeadline(prediction.sector.toUpperCase(), 350);
       clearShadow();
 
       // Connect
@@ -119,10 +165,9 @@ const App: React.FC = () => {
 
       // Tech
       applyShadow(30);
-      ctx.font = 'italic bold 92px Comfortaa';
       ctx.fillStyle = '#DE8859';
       ctx.letterSpacing = '-2px';
-      ctx.fillText(prediction.technology.toUpperCase(), 960, 560);
+      drawHeadline(prediction.technology.toUpperCase(), 560);
       clearShadow();
 
       // Strategic Argument (Automatic or Manual)
@@ -156,13 +201,18 @@ const App: React.FC = () => {
       ctx.font = 'bold 22px Montserrat';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
       ctx.letterSpacing = '8px';
-      ctx.fillText('A TUHAF STUDIO EXPERIMENT • GEMINI SYNTHESIZED', 960, 1030);
+      const synthesizedBy = currentExplanation && serverConfig.explanationProvider === 'claude' ? 'CLAUDE & GEMINI' : 'GEMINI';
+      ctx.fillText(`A TUHAF STUDIO EXPERIMENT • ${synthesizedBy} SYNTHESIZED`, 960, 1030);
 
       // Trigger Download
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error("Could not encode the vision card.");
+      const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.download = `vision-${prediction.sector.toLowerCase().replace(/\s+/g, '-')}.png`;
-      link.href = canvas.toDataURL('image/png', 1.0);
+      link.href = url;
       link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (err) {
       console.error("Artifact generation failed:", err);
       alert("Vision synthesis failed. The future is currently occluded.");
@@ -199,7 +249,7 @@ const App: React.FC = () => {
         <div className="flex items-center space-x-3 px-5 py-2 rounded-full bg-white/5 border border-white/10 backdrop-blur-xl shadow-lg ring-1 ring-white/5">
           <div className="relative flex items-center justify-center">
             <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ backgroundColor: '#DE8859' }} />
-            <span className="absolute inset-0 w-1.5 h-1.5 rounded-full blur-sm opacity-50 animate-ping" style={{ backgroundColor: '#DE8859' }} />
+            <span className="absolute inset-0 w-1.5 h-1.5 rounded-full blur-xs opacity-50 animate-ping" style={{ backgroundColor: '#DE8859' }} />
           </div>
           <span className="text-[9px] md:text-xs font-black tracking-[0.4em] uppercase opacity-90" style={{ color: '#F3C5AB' }}>
             Bright Futures Generator v2.0
@@ -252,20 +302,22 @@ const App: React.FC = () => {
               <span className="text-[10px] tracking-[0.1em] uppercase">Recast</span>
             </button>
 
-            <button
-              onClick={handleCreateArtifact}
-              disabled={isGeneratingVision}
-              className="px-5 py-3.5 rounded-xl font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all duration-300 flex items-center space-x-2 border border-white/5 group"
-            >
-              {isGeneratingVision ? (
-                <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" />
-                </svg>
-              )}
-              <span className="text-[10px] tracking-[0.1em] uppercase">{isGeneratingVision ? "Synthesizing..." : "Vision"}</span>
-            </button>
+            {serverConfig.visionEnabled && (
+              <button
+                onClick={handleCreateArtifact}
+                disabled={isGeneratingVision}
+                className="px-5 py-3.5 rounded-xl font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all duration-300 flex items-center space-x-2 border border-white/5 group"
+              >
+                {isGeneratingVision ? (
+                  <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" />
+                  </svg>
+                )}
+                <span className="text-[10px] tracking-[0.1em] uppercase">{isGeneratingVision ? "Synthesizing..." : "Vision"}</span>
+              </button>
+            )}
           </div>
         </div>
 
