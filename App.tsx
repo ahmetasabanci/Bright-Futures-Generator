@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { SECTORS, TECHNOLOGIES } from './constants';
 import { FuturePrediction, ExplanationState } from './types';
-import { fetchExplanation, generateVisionImage } from './services/geminiService';
+import { fetchExplanation, fetchServerConfig, generateVisionImage, ServerConfig } from './services/apiService';
 import BackgroundEffects from './components/BackgroundEffects';
 
 // Every font face the vision card draws with. Canvas text doesn't trigger web font
@@ -31,6 +31,8 @@ const App: React.FC = () => {
   });
   const [isGeneratingVision, setIsGeneratingVision] = useState(false);
   const [showCopyFeedback, setShowCopyFeedback] = useState(false);
+  // Assume the original Gemini-only setup until the server says otherwise
+  const [serverConfig, setServerConfig] = useState<ServerConfig>({ explanationProvider: 'gemini', visionEnabled: true });
   // Bumped on every recast so responses for an older prediction are discarded
   const predictionIdRef = useRef(0);
   
@@ -46,6 +48,12 @@ const App: React.FC = () => {
   useEffect(() => {
     generateNewPrediction();
   }, [generateNewPrediction]);
+
+  useEffect(() => {
+    fetchServerConfig()
+      .then(setServerConfig)
+      .catch(err => console.warn("Could not load server config, using defaults.", err));
+  }, []);
 
   const handleExplain = async () => {
     if (!prediction.sector || !prediction.technology) return;
@@ -193,7 +201,8 @@ const App: React.FC = () => {
       ctx.font = 'bold 22px Montserrat';
       ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
       ctx.letterSpacing = '8px';
-      ctx.fillText('A TUHAF STUDIO EXPERIMENT • GEMINI SYNTHESIZED', 960, 1030);
+      const synthesizedBy = currentExplanation && serverConfig.explanationProvider === 'claude' ? 'CLAUDE & GEMINI' : 'GEMINI';
+      ctx.fillText(`A TUHAF STUDIO EXPERIMENT • ${synthesizedBy} SYNTHESIZED`, 960, 1030);
 
       // Trigger Download
       const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
@@ -293,20 +302,22 @@ const App: React.FC = () => {
               <span className="text-[10px] tracking-[0.1em] uppercase">Recast</span>
             </button>
 
-            <button
-              onClick={handleCreateArtifact}
-              disabled={isGeneratingVision}
-              className="px-5 py-3.5 rounded-xl font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all duration-300 flex items-center space-x-2 border border-white/5 group"
-            >
-              {isGeneratingVision ? (
-                <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-              ) : (
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" />
-                </svg>
-              )}
-              <span className="text-[10px] tracking-[0.1em] uppercase">{isGeneratingVision ? "Synthesizing..." : "Vision"}</span>
-            </button>
+            {serverConfig.visionEnabled && (
+              <button
+                onClick={handleCreateArtifact}
+                disabled={isGeneratingVision}
+                className="px-5 py-3.5 rounded-xl font-bold text-slate-400 hover:text-white hover:bg-white/5 transition-all duration-300 flex items-center space-x-2 border border-white/5 group"
+              >
+                {isGeneratingVision ? (
+                  <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-3.5 w-3.5 group-hover:scale-110 transition-transform" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-7.714 2.143L11 21l-2.286-6.857L1 12l7.714-2.143L11 3z" />
+                  </svg>
+                )}
+                <span className="text-[10px] tracking-[0.1em] uppercase">{isGeneratingVision ? "Synthesizing..." : "Vision"}</span>
+              </button>
+            )}
           </div>
         </div>
 

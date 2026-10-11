@@ -4,6 +4,7 @@ import { GoogleGenAI } from "@google/genai";
 import { Request, Response, NextFunction } from "express";
 import { rateLimit } from "express-rate-limit";
 import { SECTORS, TECHNOLOGIES } from "./constants";
+import { createExplainer, resolveExplanationProvider } from "./server/explanation";
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
@@ -27,15 +28,23 @@ app.use((req, res, next) => {
 // Enable JSON body parsing for API requests (payloads are two short strings)
 app.use(express.json({ limit: "1kb" }));
 
-// Initialize server-side Gemini client securely
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build",
-    },
-  },
-});
+// Initialize server-side AI clients. Gemini handles images (and explanations by
+// default); Claude can handle explanations when ANTHROPIC_API_KEY is configured.
+const ai = process.env.GEMINI_API_KEY
+  ? new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build",
+        },
+      },
+    })
+  : null;
+const explanationProvider = resolveExplanationProvider();
+const explain = explanationProvider ? createExplainer(explanationProvider, ai) : null;
+console.log(
+  `Explanations: ${explanationProvider ?? "not configured"} | Vision images: ${ai ? "gemini" : "disabled (no GEMINI_API_KEY)"}`,
+);
 
 // Middleware to protect API routes from cross-site proxy abuse
 function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
@@ -96,10 +105,6 @@ function validatePrediction(req: Request, res: Response, next: NextFunction) {
   if (!SECTOR_SET.has(sector) || !TECHNOLOGY_SET.has(technology)) {
     return res.status(400).json({ error: "Unknown sector or technology." });
   }
-  if (!process.env.GEMINI_API_KEY) {
-    console.error("GEMINI_API_KEY is not configured.");
-    return res.status(500).json({ error: "The prediction service is not configured." });
-  }
   next();
 }
 
@@ -119,29 +124,21 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
+// Tells the client which features this deployment supports
+app.get("/api/config", (req, res) => {
+  res.json({ explanationProvider, visionEnabled: Boolean(ai) });
+});
+
+const notConfigured = (res: Response) =>
+  res.status(503).json({ error: "This feature is not configured on the server." });
+
 // Server-side explanation casting API
 app.post("/api/predict/explain", restrictToSameOrigin, explainLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
 
-    const prompt = `
-      The statement is: "The future of ${sector} will be bright because of ${technology}."
-      
-      Provide a short, optimistic, and compelling 2-3 sentence argument explaining why this combination specifically creates a better future. 
-      Use professional but inspiring language. Avoid cliches.
-    `;
-
-    // Using gemini-3.5-flash as recommended for general text task in guidelines
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        temperature: 0.8,
-        topP: 0.9,
-      },
-    });
-
-    res.json({ text: response.text || "No explanation could be generated at this time." });
+    if (!explain) return notConfigured(res);
+    res.json({ text: await explain(sector, technology) });
   } catch (error) {
     console.error("Strategic Argument Generation Error:", error);
     res.status(500).json({
@@ -154,6 +151,8 @@ app.post("/api/predict/explain", restrictToSameOrigin, explainLimiter, validateP
 app.post("/api/predict/vision", restrictToSameOrigin, visionLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
+
+    if (!ai) return notConfigured(res);
 
     const prompt = `A cinematic, high-quality, futuristic visualization of ${technology} transforming ${sector}. 
       Abstract, clean, professional aesthetic, optimistic atmosphere, wide-angle 16:9 composition. 
