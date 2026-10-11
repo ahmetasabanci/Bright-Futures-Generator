@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { SECTORS, TECHNOLOGIES } from './constants';
 import { FuturePrediction, ExplanationState } from './types';
 import { fetchExplanation, generateVisionImage } from './services/geminiService';
@@ -14,8 +14,11 @@ const App: React.FC = () => {
   });
   const [isGeneratingVision, setIsGeneratingVision] = useState(false);
   const [showCopyFeedback, setShowCopyFeedback] = useState(false);
+  // Bumped on every recast so responses for an older prediction are discarded
+  const predictionIdRef = useRef(0);
   
   const generateNewPrediction = useCallback(() => {
+    predictionIdRef.current++;
     const randomSector = SECTORS[Math.floor(Math.random() * SECTORS.length)];
     const randomTech = TECHNOLOGIES[Math.floor(Math.random() * TECHNOLOGIES.length)];
     setPrediction({ sector: randomSector, technology: randomTech });
@@ -29,14 +32,19 @@ const App: React.FC = () => {
 
   const handleExplain = async () => {
     if (!prediction.sector || !prediction.technology) return;
+    const predictionId = predictionIdRef.current;
     setExplanation(prev => ({ ...prev, isLoading: true, error: null }));
     try {
       const response = await fetchExplanation(prediction.sector, prediction.technology);
-      setExplanation({ text: response, isLoading: false, error: null });
+      if (predictionId === predictionIdRef.current) {
+        setExplanation({ text: response, isLoading: false, error: null });
+      }
       return response;
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'An unexpected error occurred.';
-      setExplanation({ text: '', isLoading: false, error: msg });
+      if (predictionId === predictionIdRef.current) {
+        setExplanation({ text: '', isLoading: false, error: msg });
+      }
       throw new Error(msg);
     }
   };
@@ -44,18 +52,18 @@ const App: React.FC = () => {
   const handleCreateArtifact = async () => {
     setIsGeneratingVision(true);
     try {
-      // 1. Auto-generate explanation if missing so the card is complete
-      let currentExplanation = explanation.text;
-      if (!currentExplanation) {
-        try {
-          currentExplanation = await handleExplain() || '';
-        } catch (e) {
-          console.warn("Could not fetch explanation for artifact, proceeding with basic card.");
-        }
-      }
-
-      // 2. Generate the background vision
-      const base64Image = await generateVisionImage(prediction.sector, prediction.technology);
+      // 1. Auto-generate explanation if missing so the card is complete,
+      // 2. while generating the background vision in parallel
+      const explanationPromise = explanation.text
+        ? Promise.resolve(explanation.text)
+        : handleExplain().then(text => text || '').catch(() => {
+            console.warn("Could not fetch explanation for artifact, proceeding with basic card.");
+            return '';
+          });
+      const [currentExplanation, base64Image] = await Promise.all([
+        explanationPromise,
+        generateVisionImage(prediction.sector, prediction.technology),
+      ]);
       
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
@@ -65,8 +73,11 @@ const App: React.FC = () => {
       canvas.height = 1080;
 
       const bgImg = new Image();
-      bgImg.src = base64Image;
-      await new Promise((resolve) => (bgImg.onload = resolve));
+      await new Promise((resolve, reject) => {
+        bgImg.onload = resolve;
+        bgImg.onerror = () => reject(new Error("Generated vision image could not be decoded."));
+        bgImg.src = base64Image;
+      });
 
       // 3. Draw Background & Overlays
       ctx.drawImage(bgImg, 0, 0, 1920, 1080);
@@ -159,10 +170,14 @@ const App: React.FC = () => {
       ctx.fillText('A TUHAF STUDIO EXPERIMENT • GEMINI SYNTHESIZED', 960, 1030);
 
       // Trigger Download
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+      if (!blob) throw new Error("Could not encode the vision card.");
+      const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.download = `vision-${prediction.sector.toLowerCase().replace(/\s+/g, '-')}.png`;
-      link.href = canvas.toDataURL('image/png', 1.0);
+      link.href = url;
       link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
     } catch (err) {
       console.error("Artifact generation failed:", err);
       alert("Vision synthesis failed. The future is currently occluded.");

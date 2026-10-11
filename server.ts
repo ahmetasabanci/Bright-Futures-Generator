@@ -2,12 +2,30 @@ import express from "express";
 import path from "path";
 import { GoogleGenAI } from "@google/genai";
 import { Request, Response, NextFunction } from "express";
+import { rateLimit } from "express-rate-limit";
+import { SECTORS, TECHNOLOGIES } from "./constants";
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 
-// Enable JSON body parsing for API requests
-app.use(express.json());
+app.disable("x-powered-by");
+
+// Rate limiting keys on req.ip, so behind a reverse proxy (e.g. Cloud Run) we must
+// trust the proxy's X-Forwarded-For. Only trust it when actually deployed behind one,
+// otherwise clients could spoof the header to dodge the limits.
+const trustProxy = process.env.TRUST_PROXY ?? (process.env.K_SERVICE ? "1" : undefined);
+if (trustProxy !== undefined) {
+  app.set("trust proxy", /^\d+$/.test(trustProxy) ? Number(trustProxy) : trustProxy);
+}
+
+app.use((req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+  next();
+});
+
+// Enable JSON body parsing for API requests (payloads are two short strings)
+app.use(express.json({ limit: "1kb" }));
 
 // Initialize server-side Gemini client securely
 const ai = new GoogleGenAI({
@@ -37,6 +55,9 @@ function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
   }
 
   // Fallback origin checking against Host for older browsers
+  if (!origin && !referer) {
+    return res.status(403).json({ error: "Access Denied. Missing request origin." });
+  }
   if (origin) {
     const originHost = origin.replace(/^https?:\/\//, "");
     if (originHost !== host) {
@@ -62,24 +83,46 @@ function restrictToSameOrigin(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+const SECTOR_SET = new Set(SECTORS);
+const TECHNOLOGY_SET = new Set(TECHNOLOGIES);
+
+// Only accept combinations the UI can actually produce. This keeps user-controlled
+// text out of the prompts, so the endpoints can't be used as a general Gemini proxy.
+function validatePrediction(req: Request, res: Response, next: NextFunction) {
+  const { sector, technology } = req.body ?? {};
+  if (typeof sector !== "string" || typeof technology !== "string") {
+    return res.status(400).json({ error: "Both sector and technology parameters are required." });
+  }
+  if (!SECTOR_SET.has(sector) || !TECHNOLOGY_SET.has(technology)) {
+    return res.status(400).json({ error: "Unknown sector or technology." });
+  }
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("GEMINI_API_KEY is not configured.");
+    return res.status(500).json({ error: "The prediction service is not configured." });
+  }
+  next();
+}
+
+const rateLimitMessage = { error: "Too many requests. Please wait a few minutes and try again." };
+const limiterDefaults = {
+  windowMs: 10 * 60 * 1000,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: rateLimitMessage,
+} as const;
+const explainLimiter = rateLimit({ ...limiterDefaults, limit: 30 });
+// Image generation is the expensive call, so it gets a tighter budget
+const visionLimiter = rateLimit({ ...limiterDefaults, limit: 10 });
+
 // Health check endpoint
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
 // Server-side explanation casting API
-app.post("/api/predict/explain", restrictToSameOrigin, async (req, res) => {
+app.post("/api/predict/explain", restrictToSameOrigin, explainLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
-    if (!sector || !technology) {
-      return res.status(400).json({ error: "Both sector and technology parameters are required." });
-    }
-
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({
-        error: "Server configuration missing: GEMINI_API_KEY is not configured.",
-      });
-    }
 
     const prompt = `
       The statement is: "The future of ${sector} will be bright because of ${technology}."
@@ -102,24 +145,15 @@ app.post("/api/predict/explain", restrictToSameOrigin, async (req, res) => {
   } catch (error) {
     console.error("Strategic Argument Generation Error:", error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to connect to the future-seeing core.",
+      error: "Failed to connect to the future-seeing core.",
     });
   }
 });
 
 // Server-side vision image generation API
-app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
+app.post("/api/predict/vision", restrictToSameOrigin, visionLimiter, validatePrediction, async (req, res) => {
   try {
     const { sector, technology } = req.body;
-    if (!sector || !technology) {
-      return res.status(400).json({ error: "Both sector and technology parameters are required." });
-    }
-
-    if (!process.env.GEMINI_API_KEY) {
-      return res.status(500).json({
-        error: "Server configuration missing: GEMINI_API_KEY is not configured.",
-      });
-    }
 
     const prompt = `A cinematic, high-quality, futuristic visualization of ${technology} transforming ${sector}. 
       Abstract, clean, professional aesthetic, optimistic atmosphere, wide-angle 16:9 composition. 
@@ -139,7 +173,7 @@ app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
     if (response?.candidates?.[0]?.content?.parts) {
       for (const part of response.candidates[0].content.parts) {
         if (part.inlineData) {
-          base64Image = `data:image/png;base64,${part.inlineData.data}`;
+          base64Image = `data:${part.inlineData.mimeType || "image/png"};base64,${part.inlineData.data}`;
           break;
         }
       }
@@ -153,7 +187,7 @@ app.post("/api/predict/vision", restrictToSameOrigin, async (req, res) => {
   } catch (error) {
     console.error("Vision Synthesis Error:", error);
     res.status(500).json({
-      error: error instanceof Error ? error.message : "Connection failed during vision synthesis.",
+      error: "Connection failed during vision synthesis.",
     });
   }
 });
@@ -169,6 +203,8 @@ async function integrateVite() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), "dist");
+    // Vite emits content-hashed filenames under /assets, so they can be cached forever
+    app.use("/assets", express.static(path.join(distPath, "assets"), { immutable: true, maxAge: "1y" }));
     app.use(express.static(distPath));
     app.get("*all", (req, res) => {
       res.sendFile(path.join(distPath, "index.html"));
